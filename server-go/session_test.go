@@ -113,3 +113,35 @@ func TestIdleSessionRemainsAvailableUntilAnExplicitLifecycleCondition(t *testing
 		t.Fatalf("an idle session must remain available before its absolute deadline, got %v", err)
 	}
 }
+
+func TestRemainingParticipantKeepsHeartbeatDuringExitGraceWindow(t *testing.T) {
+	manager := NewSessionManager()
+	id, creatorToken, err := manager.Create()
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	remainingToken, err := manager.Join(id)
+	if err != nil {
+		t.Fatalf("join session: %v", err)
+	}
+	manager.mu.Lock()
+	manager.sessions[id].participants[remainingToken].online = true
+	manager.mu.Unlock()
+
+	if err := manager.Leave(id, creatorToken); err != nil {
+		t.Fatalf("creator leave: %v", err)
+	}
+	status, err := manager.Status(id, remainingToken)
+	if err != nil {
+		t.Fatalf("remaining participant must retain status access: %v", err)
+	}
+	if status.State != stateClosing || status.DestroyAt == nil {
+		t.Fatal("remaining participant must receive the one-minute closing state")
+	}
+	if err := manager.Relay(id, remainingToken, []byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("heartbeat must remain valid during grace period: %v", err)
+	}
+	if err := manager.Relay(id, remainingToken, []byte(`{"type":"ciphertext"}`)); !errors.Is(err, errSessionClosing) {
+		t.Fatalf("new content must remain blocked during grace period, got %v", err)
+	}
+}

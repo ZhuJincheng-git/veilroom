@@ -22,6 +22,7 @@ type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt
 type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
 type ChatItem = { id: string; sender: "you" | "peer"; kind: "message" | "file"; text?: string; file?: FileMeta };
 type IncomingFile = ReceivedFile & { meta: FileMeta };
+type BinaryCell = { id: number; bit: "0" | "1"; phase: number; bright: boolean };
 
 const directFileLimit = 2 * 1024 * 1024;
 const directChunkSize = 24 * 1024;
@@ -39,6 +40,7 @@ const messages = ref<ChatItem[]>([]);
 const now = ref(Date.now());
 const isSecure = ref(false);
 const sendingFile = ref(false);
+const binaryCells = ref<BinaryCell[]>([]);
 let socket: WebSocket | null = null;
 let privateKey: CryptoKey | null = null;
 let sessionKey: CryptoKey | null = null;
@@ -54,6 +56,7 @@ const returnHomeAt = ref<number | null>(null);
 let toastTimer: number | undefined;
 let toastSequence = 0;
 let heartbeatTimer: number | undefined;
+let byteFieldTimer: number | undefined;
 
 const countdownTarget = computed(() => sessionDeadline(status.value));
 const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
@@ -63,9 +66,11 @@ const peerLabel = computed(() => status.value?.peerOnline ? "在线且已加密"
 const canSend = computed(() => isSecure.value && status.value?.state === "LOCKED" && status.value.peerOnline);
 const canSendFile = computed(() => Boolean(canSend.value && status.value?.fileTransferAvailable));
 const returnHomeSeconds = computed(() => secondsUntilReturn(returnHomeAt.value, now.value));
+const isReadOnlyGrace = computed(() => status.value?.state === "CLOSING");
 
 onMounted(() => {
   ticker = window.setInterval(() => { now.value = Date.now(); }, 250);
+  initialiseByteField();
   const match = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]{20,})$/);
   const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
   if (match && fragment.get("p")) {
@@ -80,6 +85,7 @@ onBeforeUnmount(() => {
   clearReturnHomeTimer();
   clearToastTimer();
   clearHeartbeat();
+  clearByteFieldTimer();
   closeSocket();
 });
 
@@ -366,6 +372,24 @@ function clearHeartbeat() {
   if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
   heartbeatTimer = undefined;
 }
+function initialiseByteField() {
+  binaryCells.value = Array.from({ length: 180 }, (_, id) => ({ id, bit: Math.random() > 0.5 ? "1" : "0", phase: 0, bright: Math.random() > 0.87 }));
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  byteFieldTimer = window.setInterval(() => {
+    const next = [...binaryCells.value];
+    const changes = 7 + Math.floor(Math.random() * 12);
+    for (let count = 0; count < changes; count += 1) {
+      const index = Math.floor(Math.random() * next.length);
+      const cell = next[index];
+      next[index] = { ...cell, bit: cell.bit === "0" ? "1" : "0", phase: cell.phase + 1, bright: Math.random() > 0.74 };
+    }
+    binaryCells.value = next;
+  }, 720);
+}
+function clearByteFieldTimer() {
+  if (byteFieldTimer !== undefined) window.clearInterval(byteFieldTimer);
+  byteFieldTimer = undefined;
+}
 function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
 function failSecurely(reason: string) { notify(reason, "error"); endSession(); }
 function ownRole() { return status.value?.you ?? "unknown"; }
@@ -402,30 +426,48 @@ function humanError(caught: unknown) {
 </script>
 
 <template>
-  <main class="app-shell" :class="{ 'session-shell': phase === 'room' }">
+  <div class="byte-field" aria-hidden="true">
+    <span v-for="cell in binaryCells" :key="`${cell.id}-${cell.phase}`" class="byte-cell" :class="{ bright: cell.bright }">{{ cell.bit }}</span>
+  </div>
+  <main class="app-shell" :class="{ 'session-shell': phase === 'room', 'home-shell': phase === 'home' }">
     <header class="topbar">
-      <a class="brand" href="/" aria-label="VeilRoom 首页"><span class="brand-mark">V</span><span>veilroom</span></a>
-      <span class="privacy-mark"><i></i> 零存储 · 端到端加密</span>
+      <a class="brand" href="/" aria-label="VeilRoom 首页"><span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5 9.7 18h4.6L20 5.5M8 5.5l4 8.7 4-8.7" /></svg></span><span>veilroom</span></a>
+      <span class="topbar-signal" aria-hidden="true"><i></i><i></i><i></i></span>
     </header>
 
-    <section v-if="phase === 'home'" class="landing-grid">
-      <div class="landing-copy">
-        <p class="eyebrow">A private moment, by design</p>
-        <h1>只留下此刻，<br><em>不留下痕迹。</em></h1>
-        <p class="lede">为两个人设计的临时私密空间。无需账户，十分钟后自动消隐，聊天与文件仅以密文经过服务端。</p>
-        <button class="primary-action" @click="createSession"><span>创建私密会话</span><b>→</b></button>
-        <p class="fine-print">创建即代表你将通过可信渠道分享加密邀请链接。</p>
-      </div>
-      <aside class="join-card" aria-label="加入会话">
-        <div class="card-orbit"></div>
-        <p class="eyebrow">Have an invitation?</p>
-        <h2>进入已开启的房间</h2>
-        <label for="invite">邀请链接</label>
-        <textarea id="invite" v-model="joinCode" placeholder="粘贴完整 VeilRoom 邀请链接" rows="3"></textarea>
-        <button class="secondary-action" @click="useCode">验证并继续 <span>↗</span></button>
-        <p class="key-note">链接的 <code>#</code> 后部分只留在你的浏览器中，不会发送到服务器。</p>
-      </aside>
-    </section>
+    <template v-if="phase === 'home'">
+      <section class="hero-section">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="hash-cursor">01</span> PRIVATE BY DEFAULT</p>
+          <h1>只属于此刻。<br><em>只属于两人。</em></h1>
+          <p class="lede">创建一段会自行消隐的对话。</p>
+          <div class="hero-actions"><button class="primary-action" @click="createSession"><span>创建私密会话</span><b>→</b></button><span class="action-hint">分享一把短暂的钥匙</span></div>
+        </div>
+        <aside class="join-card" aria-label="加入会话">
+          <span class="card-index">// INVITE</span>
+          <h2>已有一把钥匙</h2>
+          <label class="sr-only" for="invite">邀请链接</label>
+          <textarea id="invite" v-model="joinCode" placeholder="粘贴邀请链接" rows="3"></textarea>
+          <button class="secondary-action" @click="useCode"><span>进入会话</span><b>↗</b></button>
+        </aside>
+      </section>
+      <section class="home-section why-section" aria-labelledby="why-title">
+        <div class="section-heading"><p class="eyebrow">02 / WHY VEILROOM</p><h2 id="why-title">把一段对话，<em>留在当下。</em></h2></div>
+        <div class="principle-grid">
+          <article class="principle-card"><span class="card-code">01</span><h3>不用留下身份</h3><p>没有账户，没有联系人列表。创建即开始。</p></article>
+          <article class="principle-card"><span class="card-code">02</span><h3>只为两个人</h3><p>第二位参与者到达后，入口安静关闭。</p></article>
+          <article class="principle-card"><span class="card-code">03</span><h3>自然地消隐</h3><p>时间走完，访问能力与本地内容一起归零。</p></article>
+        </div>
+      </section>
+      <section class="home-section security-section" aria-labelledby="security-title">
+        <div class="section-heading"><p class="eyebrow">03 / SECURITY PATH</p><h2 id="security-title">安全性，不应打断<br><em>你的表达。</em></h2></div>
+        <div class="security-map" aria-label="端到端加密流程">
+          <div class="security-node"><span>01</span><b>浏览器加密</b><small>内容先于传输被封存</small></div><i></i>
+          <div class="security-node"><span>02</span><b>仅转发密文</b><small>服务只负责抵达</small></div><i></i>
+          <div class="security-node"><span>03</span><b>内存归零</b><small>结束即不再保留</small></div>
+        </div>
+      </section>
+    </template>
 
     <section v-else-if="phase === 'joining'" class="decision-panel">
       <span class="veil-icon">◌</span>
@@ -437,19 +479,17 @@ function humanError(caught: unknown) {
 
     <section v-else-if="phase === 'room'" class="room-layout">
       <aside class="room-sidebar">
-        <div>
-          <p class="eyebrow">Ephemeral session</p>
-          <h2>仅限两人</h2>
-          <div class="timer-block" :class="{ warning: isClosing }"><span>剩余时间</span><strong>{{ formattedRemaining }}</strong><small>{{ !status ? '正在同步安全会话状态' : status.state === 'CLOSING' ? '会话即将消隐' : '最长 10 分钟' }}</small></div>
-        </div>
-        <div class="peer-state"><span class="presence" :class="{ online: status?.peerOnline }"></span><div><b>另一位参与者</b><p>{{ peerLabel }}</p></div></div>
-        <div class="security-detail"><span>⌁</span><p><b>{{ isSecure ? '加密已验证' : '正在验证密钥' }}</b>你的密钥仅存在于此浏览器内存中。</p></div>
-        <button class="leave-button" @click="leaveSession">离开并销毁访问权 <span>×</span></button>
+        <div class="room-status-head"><span class="card-index">// SESSION</span><span class="session-hash">{{ status?.you === 'A' ? 'A/02' : 'B/02' }}</span></div>
+        <div class="timer-block" :class="{ warning: isClosing }"><span>{{ isReadOnlyGrace ? '留存窗口' : '剩余时间' }}</span><strong>{{ formattedRemaining }}</strong><small>{{ isReadOnlyGrace ? '静待会话归零' : !status ? '状态同步中' : ' ' }}</small></div>
+        <div class="peer-state"><span class="presence" :class="{ online: status?.peerOnline }"></span><div><b>{{ status?.peerOnline ? '已连接' : isReadOnlyGrace ? '对方已离开' : '等待连接' }}</b><p>{{ isSecure ? '密钥已确认' : '正在交换密钥' }}</p></div></div>
+        <div class="room-spacer"></div>
+        <div class="protocol-line"><span>⌁</span><code>{{ isSecure ? 'a9:7f:02:cc' : '············' }}</code></div>
+        <button class="leave-button" @click="leaveSession"><span>离开</span><b>↗</b></button>
       </aside>
       <article class="conversation">
-        <div class="conversation-head"><div><p class="eyebrow">Veil Channel</p><h2>{{ status?.you === 'A' ? '你发起的会话' : '受邀会话' }}</h2></div><span class="locked">锁定</span></div>
+        <div class="conversation-head"><div><p class="eyebrow">VEIL CHANNEL</p><h2>{{ isReadOnlyGrace ? '会话将在此刻结束' : status?.you === 'A' ? '你的会话' : '受邀会话' }}</h2></div><span class="locked" :class="{ warning: isReadOnlyGrace }">{{ isReadOnlyGrace ? '留存中' : '02/02' }}</span></div>
         <div class="message-stream" aria-live="polite">
-          <div v-if="messages.length === 0" class="empty-state"><div class="signal">⌇</div><p>{{ isSecure ? '安全通道已建立。说点什么吧。' : '正在让两把密钥彼此确认。' }}</p></div>
+          <div v-if="messages.length === 0" class="empty-state"><div class="signal">01 01 00</div><p>{{ isReadOnlyGrace ? '这段会话正在安静留存。' : isSecure ? '安全通道已建立。' : '正在确认密钥。' }}</p></div>
           <div v-for="item in messages" :key="item.id" class="message-row" :class="item.sender">
             <div v-if="item.kind === 'message'" class="bubble">{{ item.text }}</div>
             <button v-else class="file-card" @click="item.sender === 'peer' && item.file && downloadFile(item.file)">
@@ -463,7 +503,7 @@ function humanError(caught: unknown) {
           <button type="submit" :disabled="!canSend || !message.trim()" aria-label="发送消息">↑</button>
         </form>
       </article>
-      <section v-if="invitation" class="invite-drawer"><p><span>给另一位参与者的钥匙</span>分享此链接后，会话将锁定为两人。</p><div><code>{{ invitation }}</code><button @click="copyInvitation">复制</button></div></section>
+      <section v-if="invitation" class="invite-drawer"><span class="card-index">// SHARE</span><div><code>{{ invitation }}</code><button @click="copyInvitation" aria-label="复制邀请链接">复制</button></div></section>
     </section>
 
     <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>会话已销毁</h1><p class="eyebrow">{{ returnHomeSeconds }} 秒后返回首页</p></section>

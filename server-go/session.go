@@ -202,12 +202,21 @@ func (m *SessionManager) Relay(id, token string, payload []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, ok := m.sessions[id]
-	if !ok || s.state != stateLocked {
+	if !ok || s.state == stateDestroyed {
 		return errSessionClosing
 	}
 	sender, ok := s.participants[token]
 	if !ok || sender.left || !sender.online {
 		return errUnauthorized
+	}
+	if s.state == stateClosing {
+		if envelope.Type == "ping" {
+			return nil
+		}
+		return errSessionClosing
+	}
+	if s.state != stateLocked {
+		return errSessionClosing
 	}
 	for candidateToken, peer := range s.participants {
 		if candidateToken == token || peer.left || !peer.online {

@@ -10,7 +10,8 @@ function watchBrowserErrors(page: Page): string[] {
 }
 
 test.describe("VeilRoom anonymous session", () => {
-  test("the creator enters the newly created session immediately", async ({ page }) => {
+  test("the creator enters the newly created session immediately @production", async ({ page }) => {
+    test.setTimeout(45_000);
     const browserErrors = watchBrowserErrors(page);
     await page.goto("/");
     await page.waitForTimeout(1_300);
@@ -19,10 +20,14 @@ test.describe("VeilRoom anonymous session", () => {
     await expect(page).toHaveURL(/\/s\/[A-Za-z0-9_-]{20,}#p=[A-Za-z0-9_-]{20,}/);
     await expect(page.getByRole("heading", { name: "你的会话" })).toBeVisible();
     await expect(page.locator(".timer-block strong")).not.toHaveText("—:—");
+    await expect(page.locator(".room-layout")).toHaveAttribute("data-transport", "open");
+    await page.waitForTimeout(21_000);
+    await expect(page.locator(".room-layout")).toHaveAttribute("data-transport", "open");
+    await expect(page.getByRole("heading", { name: "你的会话" })).toBeVisible();
     expect(browserErrors).toEqual([]);
   });
 
-  test("a second participant locks the room and remains during the exit grace window", async ({ browser }) => {
+  test("a second participant locks the room and remains during the exit grace window @production", async ({ browser }) => {
     const creatorContext = await browser.newContext();
     const creator = await creatorContext.newPage();
     const creatorErrors = watchBrowserErrors(creator);
@@ -38,6 +43,14 @@ test.describe("VeilRoom anonymous session", () => {
     await guest.goto(invitation!);
     await guest.getByRole("button", { name: "安全加入" }).click();
     await expect(guest.getByRole("heading", { name: "受邀会话" })).toBeVisible();
+    await expect(creator.locator(".room-layout")).toHaveAttribute("data-transport", "open");
+    await expect(guest.locator(".room-layout")).toHaveAttribute("data-transport", "open");
+    await expect(creator.locator(".peer-state b")).toHaveText("已连接");
+    await expect(creator.locator(".peer-state p")).toHaveText("密钥已确认");
+
+    await creator.getByRole("textbox", { name: "写下只属于此刻的话…" }).fill("production relay probe");
+    await creator.getByRole("button", { name: "发送消息" }).click();
+    await expect(guest.getByText("production relay probe")).toBeVisible();
 
     await creator.getByRole("button", { name: "离开" }).click();
     await expect(guest.getByText("留存中")).toBeVisible();

@@ -1,0 +1,9 @@
+HTTP/2 302 
+date: Sat, 22 Aug 2026 17:38:17 GMT
+content-length: 0
+location: https://files.manuscdn.com/user_upload_by_module/web_dev_logo/310519663652589850/PfrCGfgpvQWUywYT.png
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-content-type-options: nosniff
+server: cloudflare
+cf-ray: a2f3a678dbb11b60-NBO
+

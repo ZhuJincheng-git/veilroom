@@ -114,6 +114,24 @@ func TestIdleSessionRemainsAvailableUntilAnExplicitLifecycleCondition(t *testing
 	}
 }
 
+func TestWaitingCreatorKeepsHeartbeatWithoutContentRelay(t *testing.T) {
+	manager := NewSessionManager()
+	id, creatorToken, err := manager.Create()
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	manager.mu.Lock()
+	manager.sessions[id].participants[creatorToken].online = true
+	manager.mu.Unlock()
+
+	if err := manager.Relay(id, creatorToken, []byte(`{"type":"ping"}`)); err != nil {
+		t.Fatalf("waiting creator heartbeat must remain valid: %v", err)
+	}
+	if err := manager.Relay(id, creatorToken, []byte(`{"type":"ciphertext"}`)); !errors.Is(err, errSessionClosing) {
+		t.Fatalf("waiting session must reject content relay, got %v", err)
+	}
+}
+
 func TestRemainingParticipantKeepsHeartbeatDuringExitGraceWindow(t *testing.T) {
 	manager := NewSessionManager()
 	id, creatorToken, err := manager.Create()

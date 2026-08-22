@@ -35,6 +35,7 @@ const invitation = ref("");
 const joinCode = ref("");
 const message = ref("");
 const status = ref<Status | null>(null);
+const transportState = ref<"idle" | "connecting" | "open" | "closed" | "failed">("idle");
 const toast = ref<AppNotification | null>(null);
 const messages = ref<ChatItem[]>([]);
 const now = ref(Date.now());
@@ -154,6 +155,7 @@ function useCode() {
 async function connect() {
   closeSocket();
   const epoch = connectionEpoch.start();
+  transportState.value = "connecting";
   isSecure.value = false;
   sessionKey = null;
   const socketScheme = window.location.protocol === "https:" ? "wss" : "ws";
@@ -161,6 +163,7 @@ async function connect() {
   socket = connection;
   connection.onopen = async () => {
     if (!connectionEpoch.isCurrent(epoch) || socket !== connection) return;
+    transportState.value = "open";
     try {
       const keyMaterial = await createKeyPacket(sessionId.value, pairingSecret.value);
       privateKey = keyMaterial.privateKey;
@@ -183,10 +186,16 @@ async function connect() {
   };
   connection.onclose = () => {
     if (connectionEpoch.isCurrent(epoch) && socket === connection && phase.value === "room") {
+      transportState.value = "closed";
       endSession();
     }
   };
-  connection.onerror = () => { if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("安全通道无法建立。未发送任何内容。"); };
+  connection.onerror = () => {
+    if (connectionEpoch.isCurrent(epoch) && socket === connection) {
+      transportState.value = "failed";
+      failSecurely("安全通道无法建立。未发送任何内容。");
+    }
+  };
 }
 
 async function hydrateStatus(epoch: number, connection: WebSocket) {
@@ -319,6 +328,7 @@ async function leaveSession() {
 function closeSocket() { clearHeartbeat(); connectionEpoch.invalidate(); const active = socket; socket = null; active?.close(); }
 function resetSessionView() {
   closeSocket();
+  transportState.value = "idle";
   wipeLocalState();
   const cleared = clearExpiredSessionView(window.history);
   sessionId.value = cleared.sessionId;
@@ -561,7 +571,7 @@ function humanError(caught: unknown) {
       <div class="decision-actions"><button class="primary-action" @click="joinSession">安全加入</button><a href="/">取消</a></div>
     </section>
 
-    <section v-else-if="phase === 'room'" class="room-layout">
+    <section v-else-if="phase === 'room'" class="room-layout" :data-transport="transportState">
       <aside class="room-sidebar">
         <div class="room-status-head"><span class="card-index">// SESSION</span><span class="session-hash">{{ status?.you === 'A' ? 'A/02' : 'B/02' }}</span></div>
         <div class="timer-block" :class="{ warning: isClosing }"><span>{{ isReadOnlyGrace ? '留存窗口' : '剩余时间' }}</span><strong>{{ formattedRemaining }}</strong><small>{{ isReadOnlyGrace ? '静待会话归零' : !status ? '状态同步中' : ' ' }}</small></div>
@@ -593,14 +603,12 @@ function humanError(caught: unknown) {
     <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>会话已销毁</h1><p class="eyebrow">{{ returnHomeSeconds }} 秒后返回首页</p></section>
 
     </main>
-    <Teleport to="body">
-      <Transition name="toast">
-        <div v-if="toast" :key="toast.id" class="global-toast" :class="toast.kind" role="status" aria-live="polite">
-          <span class="toast-glyph">{{ toast.kind === 'success' ? '✓' : toast.kind === 'warning' ? '!' : '×' }}</span>
-          <p>{{ toast.message }}</p>
-          <i class="toast-progress"></i>
-        </div>
-      </Transition>
-    </Teleport>
+    <Transition name="toast">
+      <div v-if="toast" :key="toast.id" class="global-toast" :class="toast.kind" role="status" aria-live="polite">
+        <span class="toast-glyph">{{ toast.kind === 'success' ? '✓' : toast.kind === 'warning' ? '!' : '×' }}</span>
+        <p>{{ toast.message }}</p>
+        <i class="toast-progress"></i>
+      </div>
+    </Transition>
   </div>
 </template>

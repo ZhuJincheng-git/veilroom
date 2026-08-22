@@ -1,0 +1,19 @@
+HTTP/1.1 101 Switching Protocols
+Date: Sat, 22 Aug 2026 17:34:07 GMT
+Connection: upgrade
+Upgrade: websocket
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+CF-Ray: a2f3a055180cb0f0-NBO
+CF-Cache-Status: DYNAMIC
+Cache-Control: no-store, max-age=0
+Server: cloudflare
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Pragma: no-cache
+content-security-policy: default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data: https://files.manuscdn.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://files.manuscdn.com https://plausible.io; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+permissions-policy: camera=(), microphone=(), geolocation=()
+referrer-policy: no-referrer
+traceparent: 00-58d066755e189e2990a38df54c5aa18b-04afff4642db19ae-01
+x-cloud-trace-context: 58d066755e189e2990a38df54c5aa18b/337769174310525358;o=1
+x-content-type-options: nosniff
+x-frame-options: DENY
+

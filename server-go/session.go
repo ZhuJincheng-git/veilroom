@@ -215,6 +215,12 @@ func (m *SessionManager) Relay(id, token string, payload []byte) error {
 		}
 		return errSessionClosing
 	}
+	if s.state == stateWaiting {
+		if envelope.Type == "ping" {
+			return nil
+		}
+		return errSessionClosing
+	}
 	if s.state != stateLocked {
 		return errSessionClosing
 	}

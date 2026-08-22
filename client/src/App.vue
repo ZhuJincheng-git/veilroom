@@ -16,6 +16,7 @@ import { addReceivedChunk, clearReceivedFiles, createReceivedFile, isComplete, t
 import { clearExpiredSessionView, ConnectionEpoch } from "./lib/sessionLifecycle";
 import { formatCountdown, sessionDeadline } from "./lib/countdown";
 import { secondsUntilReturn } from "./lib/returnCountdown";
+import { notificationDuration, type AppNotification, type NotificationKind } from "./lib/notification";
 
 type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt: number; destroyAt?: number; you: string; peerOnline: boolean; peerJoined: boolean; fileTransferAvailable: boolean; serverNow: number };
 type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
@@ -33,8 +34,7 @@ const invitation = ref("");
 const joinCode = ref("");
 const message = ref("");
 const status = ref<Status | null>(null);
-const error = ref("");
-const notice = ref("");
+const toast = ref<AppNotification | null>(null);
 const messages = ref<ChatItem[]>([]);
 const now = ref(Date.now());
 const isSecure = ref(false);
@@ -51,6 +51,8 @@ const connectionEpoch = new ConnectionEpoch();
 let ticker: number | undefined;
 let returnHomeTimer: number | undefined;
 const returnHomeAt = ref<number | null>(null);
+let toastTimer: number | undefined;
+let toastSequence = 0;
 
 const countdownTarget = computed(() => sessionDeadline(status.value));
 const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
@@ -75,6 +77,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (ticker) window.clearInterval(ticker);
   clearReturnHomeTimer();
+  clearToastTimer();
   closeSocket();
 });
 
@@ -103,12 +106,11 @@ async function createSession() {
     phase.value = "room";
     await connect();
   } catch (caught) {
-    error.value = humanError(caught);
+    notify(humanError(caught), "error");
   }
 }
 
 async function joinSession() {
-  error.value = "";
   try {
     if (!sessionId.value || !pairingSecret.value) throw new Error("invalid_invitation");
     const response = await api(`/api/sessions/${encodeURIComponent(sessionId.value)}/join`, { method: "POST" });
@@ -117,7 +119,7 @@ async function joinSession() {
     phase.value = "room";
     await connect();
   } catch (caught) {
-    error.value = humanError(caught);
+    notify(humanError(caught), "error");
     phase.value = "joining";
   }
 }
@@ -133,7 +135,7 @@ function useCode() {
     pairingSecret.value = secret;
     phase.value = "joining";
   } catch {
-    error.value = "请输入完整的 VeilRoom 邀请链接。密钥仅存在链接的 # 片段中。";
+    notify("请输入完整的 VeilRoom 邀请链接。密钥仅存在于浏览器中，不会发送到服务器。", "error");
   }
 }
 
@@ -189,14 +191,14 @@ async function handleIncoming(raw: string) {
   if (event.type === "session-status") {
     status.value = event as unknown as Status;
     sendKeyIfReady();
-    if (status.value.state === "CLOSING") notice.value = "已有参与者离开；会话将在一分钟内销毁。";
+    if (status.value.state === "CLOSING") notify("已有参与者离开；会话将在一分钟内销毁。", "warning");
     return;
   }
   if (event.type === "key") {
     if (!privateKey) throw new Error("missing_local_key");
     sessionKey = await deriveSessionKey(sessionId.value, pairingSecret.value, privateKey, { publicKey: String(event.publicKey), proof: String(event.proof) });
     isSecure.value = true;
-    notice.value = "端到端加密已验证。服务器只能看到密文。";
+    notify("端到端加密已验证。服务器只能看到密文。", "success");
     return;
   }
   if (event.type === "ciphertext") {
@@ -246,7 +248,7 @@ async function sendFile(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file || !sessionKey || !canSend.value) return;
-  if (file.size > directFileLimit) { error.value = "零持久化文件中继的单文件限制为 2 MB。"; return; }
+  if (file.size > directFileLimit) { notify("零持久化文件中继的单文件限制为 2 MB。", "error"); return; }
   sendingFile.value = true;
   try {
     const id = crypto.randomUUID();
@@ -264,7 +266,7 @@ async function sendFile(event: Event) {
     }
     updateFileState(id, "ready");
   } catch (caught) {
-    error.value = humanError(caught);
+    notify(humanError(caught), "error");
   } finally {
     sendingFile.value = false;
   }
@@ -273,7 +275,7 @@ async function sendFile(event: Event) {
 async function downloadFile(file: NonNullable<ChatItem["file"]>) {
   const transfer = incomingFiles.get(file.id);
   if (!transfer || !isComplete(transfer)) {
-    error.value = "文件尚未完整抵达，无法安全下载。";
+    notify("文件尚未完整抵达，无法安全下载。", "warning");
     return;
   }
   try {
@@ -283,12 +285,12 @@ async function downloadFile(file: NonNullable<ChatItem["file"]>) {
     anchor.click();
     URL.revokeObjectURL(anchor.href);
   } catch (caught) {
-    error.value = humanError(caught);
+    notify(humanError(caught), "error");
   }
 }
 
 async function copyInvitation() {
-  try { await navigator.clipboard.writeText(invitation.value); notice.value = "邀请链接已复制。请仅通过可信渠道分享。"; } catch { error.value = "复制失败，请手动复制邀请链接。"; }
+  try { await navigator.clipboard.writeText(invitation.value); notify("邀请链接已复制。请仅通过可信渠道分享。", "success"); } catch { notify("复制失败，请手动复制邀请链接。", "error"); }
 }
 
 async function leaveSession() {
@@ -312,7 +314,6 @@ function resetSessionView() {
   message.value = cleared.message;
   status.value = null;
   messages.value = cleared.messages;
-  notice.value = cleared.notice;
   sendingFile.value = false;
 }
 function endSession() {
@@ -324,7 +325,6 @@ function prepareNewSession() {
   clearReturnHomeTimer();
   returnHomeAt.value = null;
   resetSessionView();
-  error.value = "";
   phase.value = "home";
 }
 function sendKeyIfReady() {
@@ -336,7 +336,6 @@ function scheduleReturnHome() {
   returnHomeAt.value = Date.now() + 3_000;
   returnHomeTimer = window.setTimeout(() => {
     returnHomeAt.value = null;
-    error.value = "";
     phase.value = "home";
   }, 3_000);
 }
@@ -344,8 +343,17 @@ function clearReturnHomeTimer() {
   if (returnHomeTimer !== undefined) window.clearTimeout(returnHomeTimer);
   returnHomeTimer = undefined;
 }
+function notify(message: string, kind: NotificationKind) {
+  clearToastTimer();
+  toast.value = { id: ++toastSequence, message, kind };
+  toastTimer = window.setTimeout(() => { toast.value = null; toastTimer = undefined; }, notificationDuration);
+}
+function clearToastTimer() {
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+  toastTimer = undefined;
+}
 function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
-function failSecurely(reason: string) { error.value = reason; endSession(); }
+function failSecurely(reason: string) { notify(reason, "error"); endSession(); }
 function ownRole() { return status.value?.you ?? "unknown"; }
 function peerRole() { return ownRole() === "A" ? "B" : "A"; }
 function validatePeerSequence(value: unknown) {
@@ -426,8 +434,6 @@ function humanError(caught: unknown) {
       </aside>
       <article class="conversation">
         <div class="conversation-head"><div><p class="eyebrow">Veil Channel</p><h2>{{ status?.you === 'A' ? '你发起的会话' : '受邀会话' }}</h2></div><span class="locked">锁定</span></div>
-        <div v-if="notice" class="notice">{{ notice }}</div>
-        <div v-if="error" class="error-notice" role="alert">{{ error }}</div>
         <div class="message-stream" aria-live="polite">
           <div v-if="messages.length === 0" class="empty-state"><div class="signal">⌇</div><p>{{ isSecure ? '安全通道已建立。说点什么吧。' : '正在让两把密钥彼此确认。' }}</p></div>
           <div v-for="item in messages" :key="item.id" class="message-row" :class="item.sender">
@@ -448,6 +454,14 @@ function humanError(caught: unknown) {
 
     <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>会话已销毁</h1><p class="eyebrow">{{ returnHomeSeconds }} 秒后返回首页</p></section>
 
-    <p v-if="error && phase === 'home'" class="global-error" role="alert">{{ error }}</p>
   </main>
+  <Teleport to="body">
+    <Transition name="toast">
+      <div v-if="toast" :key="toast.id" class="global-toast" :class="toast.kind" role="status" aria-live="polite">
+        <span class="toast-glyph">{{ toast.kind === 'success' ? '✓' : toast.kind === 'warning' ? '!' : '×' }}</span>
+        <p>{{ toast.message }}</p>
+        <i class="toast-progress"></i>
+      </div>
+    </Transition>
+  </Teleport>
 </template>

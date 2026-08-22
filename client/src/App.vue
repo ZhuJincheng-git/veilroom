@@ -13,7 +13,7 @@ import {
   type KeyPacket,
 } from "./lib/crypto";
 import { addReceivedChunk, clearReceivedFiles, createReceivedFile, isComplete, type ReceivedFile } from "./lib/fileRelay";
-import { ConnectionEpoch, resetSessionUrl } from "./lib/sessionLifecycle";
+import { clearExpiredSessionView, ConnectionEpoch } from "./lib/sessionLifecycle";
 
 type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt: number; destroyAt?: number; you: string; peerOnline: boolean; peerJoined: boolean; fileTransferAvailable: boolean; serverNow: number };
 type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
@@ -164,9 +164,7 @@ async function connect() {
   };
   connection.onclose = () => {
     if (connectionEpoch.isCurrent(epoch) && socket === connection && phase.value === "room") {
-      closeSocket();
-      wipeLocalState();
-      phase.value = "ended";
+      endSession();
     }
   };
   connection.onerror = () => { if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("安全通道无法建立。未发送任何内容。"); };
@@ -286,32 +284,38 @@ async function leaveSession() {
   if (id && token) {
     try { await fetch(`/api/sessions/${encodeURIComponent(id)}/leave`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, keepalive: true, cache: "no-store" }); } catch { /* close is still fail-safe */ }
   }
-  wipeLocalState();
-  phase.value = "ended";
+  endSession();
 }
 
 function closeSocket() { connectionEpoch.invalidate(); const active = socket; socket = null; active?.close(); }
-function prepareNewSession() {
+function resetSessionView() {
   closeSocket();
   wipeLocalState();
-  sessionId.value = "";
-  invitation.value = "";
-  joinCode.value = "";
-  message.value = "";
+  const cleared = clearExpiredSessionView(window.history);
+  sessionId.value = cleared.sessionId;
+  invitation.value = cleared.invitation;
+  joinCode.value = cleared.joinCode;
+  message.value = cleared.message;
   status.value = null;
-  messages.value = [];
-  notice.value = "";
-  error.value = "";
+  messages.value = cleared.messages;
+  notice.value = cleared.notice;
   sendingFile.value = false;
-  resetSessionUrl(window.history);
+}
+function endSession() {
+  resetSessionView();
+  phase.value = "ended";
+}
+function prepareNewSession() {
+  resetSessionView();
+  error.value = "";
   phase.value = "home";
 }
 function sendKeyIfReady() {
   if (!ownKeyPacket || !status.value?.peerJoined || socket?.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ type: "key", ...ownKeyPacket }));
 }
-function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
-function failSecurely(reason: string) { error.value = reason; closeSocket(); wipeLocalState(); phase.value = "ended"; }
+function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
+function failSecurely(reason: string) { error.value = reason; endSession(); }
 function ownRole() { return status.value?.you ?? "unknown"; }
 function peerRole() { return ownRole() === "A" ? "B" : "A"; }
 function validatePeerSequence(value: unknown) {

@@ -18,3 +18,17 @@ export class ConnectionEpoch {
 export function resetSessionUrl(history: Pick<History, "replaceState">): void {
   history.replaceState({}, "", "/");
 }
+
+export type ClearedSessionView = {
+  sessionId: string;
+  invitation: string;
+  joinCode: string;
+  message: string;
+  notice: string;
+  messages: [];
+};
+
+export function clearExpiredSessionView(history: Pick<History, "replaceState">): ClearedSessionView {
+  resetSessionUrl(history);
+  return { sessionId: "", invitation: "", joinCode: "", message: "", notice: "", messages: [] };
+}

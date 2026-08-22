@@ -1,0 +1,19 @@
+HTTP/1.1 403 Forbidden
+Date: Sat, 22 Aug 2026 17:27:22 GMT
+Content-Type: application/json; charset=utf-8
+Content-Length: 30
+Connection: keep-alive
+CF-Ray: a2f3966aeb8bb199-NBO
+Cache-Control: no-store, max-age=0
+Server: cloudflare
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+Pragma: no-cache
+content-security-policy: default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'
+permissions-policy: camera=(), microphone=(), geolocation=()
+referrer-policy: no-referrer
+traceparent: 00-eb30d9115fbd5cac2340f913886c9590-3bbf7d8dafcd3979-01
+x-cloud-trace-context: eb30d9115fbd5cac2340f913886c9590/4305297816282806649;o=1
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-manus-proxy-mode: transparent/1
+

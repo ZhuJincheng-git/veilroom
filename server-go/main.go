@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,10 @@ func resolveAssetsDir() string {
 
 func (s *apiServer) serveApp(w http.ResponseWriter, r *http.Request) {
 	requestedPath := strings.TrimPrefix(filepath.Clean(r.URL.Path), "/")
+	if requestedPath == "favicon.ico" && staticExists(s.assets, "favicon.svg") {
+		http.ServeFile(w, r, filepath.Join(s.assets, "favicon.svg"))
+		return
+	}
 	if requestedPath != "" && staticExists(s.assets, requestedPath) {
 		http.ServeFile(w, r, filepath.Join(s.assets, requestedPath))
 		return
@@ -79,7 +84,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data: https://files.manuscdn.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://files.manuscdn.com https://plausible.io; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -136,7 +141,7 @@ func (s *apiServer) webSocket(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "connection_refused")
 		return
 	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{r.Host}})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{publicRequestHost(r)}})
 	if err != nil {
 		return
 	}
@@ -176,7 +181,29 @@ func sameOrigin(r *http.Request) bool {
 	if origin == "" {
 		return false
 	}
-	return strings.HasPrefix(origin, "https://"+r.Host) || (strings.HasPrefix(origin, "http://") && (strings.HasPrefix(r.Host, "localhost") || strings.HasPrefix(r.Host, "127.0.0.1")))
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || parsed.RawQuery != "" || parsed.Path != "" && parsed.Path != "/" {
+		return false
+	}
+	host := publicRequestHost(r)
+	if parsed.Host != host {
+		return false
+	}
+	return parsed.Scheme == "https" || (parsed.Scheme == "http" && isLocalHost(host))
+}
+
+func publicRequestHost(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
+		if host := strings.TrimSpace(strings.Split(forwarded, ",")[0]); host != "" {
+			return host
+		}
+	}
+	return r.Host
+}
+
+func isLocalHost(host string) bool {
+	host = strings.Split(host, ":")[0]
+	return host == "localhost" || host == "127.0.0.1" || host == "[::1]"
 }
 
 func writeSessionError(w http.ResponseWriter, err error) {

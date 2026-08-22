@@ -41,6 +41,7 @@ const now = ref(Date.now());
 const isSecure = ref(false);
 const sendingFile = ref(false);
 const binaryCells = ref<BinaryCell[]>([]);
+const byteMaskStyle = ref<Record<string, string>>({});
 let socket: WebSocket | null = null;
 let privateKey: CryptoKey | null = null;
 let sessionKey: CryptoKey | null = null;
@@ -57,6 +58,7 @@ let toastTimer: number | undefined;
 let toastSequence = 0;
 let heartbeatTimer: number | undefined;
 let byteFieldTimer: number | undefined;
+let byteMaskTimer: number | undefined;
 
 const countdownTarget = computed(() => sessionDeadline(status.value));
 const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
@@ -337,7 +339,7 @@ function prepareNewSession() {
   phase.value = "home";
 }
 function sendKeyIfReady() {
-  if (!ownKeyPacket || !status.value?.peerJoined || socket?.readyState !== WebSocket.OPEN) return;
+  if (!ownKeyPacket || status.value?.state !== "LOCKED" || !status.value.peerJoined || socket?.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ type: "key", ...ownKeyPacket }));
 }
 function scheduleReturnHome() {
@@ -374,6 +376,7 @@ function clearHeartbeat() {
 }
 function initialiseByteField() {
   binaryCells.value = Array.from({ length: 180 }, (_, id) => ({ id, bit: Math.random() > 0.5 ? "1" : "0", phase: 0, bright: Math.random() > 0.87 }));
+  moveByteMask();
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   byteFieldTimer = window.setInterval(() => {
     const next = [...binaryCells.value];
@@ -385,10 +388,21 @@ function initialiseByteField() {
     }
     binaryCells.value = next;
   }, 720);
+  byteMaskTimer = window.setInterval(moveByteMask, 2_300);
+}
+function moveByteMask() {
+  const point = () => `${12 + Math.floor(Math.random() * 76)}%`;
+  byteMaskStyle.value = {
+    "--mask-one-x": point(), "--mask-one-y": point(),
+    "--mask-two-x": point(), "--mask-two-y": point(),
+    "--mask-three-x": point(), "--mask-three-y": point(),
+  };
 }
 function clearByteFieldTimer() {
   if (byteFieldTimer !== undefined) window.clearInterval(byteFieldTimer);
+  if (byteMaskTimer !== undefined) window.clearInterval(byteMaskTimer);
   byteFieldTimer = undefined;
+  byteMaskTimer = undefined;
 }
 function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
 function failSecurely(reason: string) { notify(reason, "error"); endSession(); }
@@ -426,7 +440,7 @@ function humanError(caught: unknown) {
 </script>
 
 <template>
-  <div class="byte-field" aria-hidden="true">
+  <div class="byte-field" :style="byteMaskStyle" aria-hidden="true">
     <span v-for="cell in binaryCells" :key="`${cell.id}-${cell.phase}`" class="byte-cell" :class="{ bright: cell.bright }">{{ cell.bit }}</span>
   </div>
   <main class="app-shell" :class="{ 'session-shell': phase === 'room', 'home-shell': phase === 'home' }">

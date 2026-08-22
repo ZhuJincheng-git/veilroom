@@ -10,12 +10,15 @@
     "start": "./dist/veilroom",
     "check": "vue-tsc --noEmit -p tsconfig.json",
     "format": "prettier --write .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:ci": "pnpm run check && pnpm test && cd server-go && go test ./... && cd .. && pnpm run build && pnpm run test:e2e"
   },
   "dependencies": {
     "vue": "^3.5.41"
   },
   "devDependencies": {
+    "@playwright/test": "^1.52.0",
     "@vitejs/plugin-vue": "^5.2.4",
     "typescript": "5.9.3",
     "vite": "^7.1.9",

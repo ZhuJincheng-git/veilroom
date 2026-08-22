@@ -380,22 +380,23 @@ function initialiseByteField() {
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
   byteFieldTimer = window.setInterval(() => {
     const next = [...binaryCells.value];
-    const changes = 7 + Math.floor(Math.random() * 12);
+    const changes = 16 + Math.floor(Math.random() * 20);
     for (let count = 0; count < changes; count += 1) {
       const index = Math.floor(Math.random() * next.length);
       const cell = next[index];
       next[index] = { ...cell, bit: cell.bit === "0" ? "1" : "0", phase: cell.phase + 1, bright: Math.random() > 0.74 };
     }
     binaryCells.value = next;
-  }, 720);
-  byteMaskTimer = window.setInterval(moveByteMask, 2_300);
+  }, 260);
+  byteMaskTimer = window.setInterval(moveByteMask, 1_180);
 }
 function moveByteMask() {
-  const point = () => `${12 + Math.floor(Math.random() * 76)}%`;
+  const horizontal = () => `${8 + Math.floor(Math.random() * 84)}%`;
+  const vertical = () => `${-12 + Math.floor(Math.random() * 56)}%`;
   byteMaskStyle.value = {
-    "--mask-one-x": point(), "--mask-one-y": point(),
-    "--mask-two-x": point(), "--mask-two-y": point(),
-    "--mask-three-x": point(), "--mask-three-y": point(),
+    "--mask-one-x": horizontal(), "--mask-one-y": vertical(),
+    "--mask-two-x": horizontal(), "--mask-two-y": vertical(),
+    "--mask-three-x": horizontal(), "--mask-three-y": vertical(),
   };
 }
 function clearByteFieldTimer() {
@@ -441,7 +442,7 @@ function humanError(caught: unknown) {
 
 <template>
   <div class="byte-field" :style="byteMaskStyle" aria-hidden="true">
-    <span v-for="cell in binaryCells" :key="`${cell.id}-${cell.phase}`" class="byte-cell" :class="{ bright: cell.bright }">{{ cell.bit }}</span>
+    <span v-for="cell in binaryCells" :key="cell.id" class="byte-cell" :class="{ bright: cell.bright, changing: cell.phase > 0 }">{{ cell.bit }}</span>
   </div>
   <main class="app-shell" :class="{ 'session-shell': phase === 'room', 'home-shell': phase === 'home' }">
     <header class="topbar">

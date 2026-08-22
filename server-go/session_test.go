@@ -1,26 +1,13 @@
 package main
 
 import (
-	"context"
 	"errors"
-	"io"
 	"testing"
 	"time"
 )
 
-type memoryStore struct{ deleted []string }
-
-func (m *memoryStore) Put(context.Context, string, io.Reader, int64) error { return nil }
-func (m *memoryStore) Get(context.Context, string) (io.ReadCloser, int64, error) {
-	return nil, 0, errors.New("not implemented")
-}
-func (m *memoryStore) Delete(_ context.Context, key string) error {
-	m.deleted = append(m.deleted, key)
-	return nil
-}
-
 func TestSessionLocksAfterSecondParticipant(t *testing.T) {
-	manager := NewSessionManager(&memoryStore{})
+	manager := NewSessionManager()
 	id, creatorToken, err := manager.Create()
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -37,7 +24,7 @@ func TestSessionLocksAfterSecondParticipant(t *testing.T) {
 }
 
 func TestExplicitLeaveRevokesCapabilityAndSchedulesClosing(t *testing.T) {
-	manager := NewSessionManager(&memoryStore{})
+	manager := NewSessionManager()
 	id, creatorToken, err := manager.Create()
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -61,7 +48,7 @@ func TestExplicitLeaveRevokesCapabilityAndSchedulesClosing(t *testing.T) {
 }
 
 func TestCreatorLeavingBeforeInviteeStillStartsClosingWindow(t *testing.T) {
-	manager := NewSessionManager(&memoryStore{})
+	manager := NewSessionManager()
 	id, creatorToken, err := manager.Create()
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -78,8 +65,8 @@ func TestCreatorLeavingBeforeInviteeStillStartsClosingWindow(t *testing.T) {
 	}
 }
 
-func TestSessionHasImmutableTenMinuteExpiryAndDisablesFilesWithoutDeletableStorage(t *testing.T) {
-	manager := NewSessionManager(nil)
+func TestSessionHasImmutableTenMinuteExpiryAndEnablesDirectFileRelay(t *testing.T) {
+	manager := NewSessionManager()
 	id, creatorToken, err := manager.Create()
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -95,13 +82,13 @@ func TestSessionHasImmutableTenMinuteExpiryAndDisablesFilesWithoutDeletableStora
 	if err != nil {
 		t.Fatalf("get status: %v", err)
 	}
-	if status.FileTransferAvailable {
-		t.Fatal("file uploads must be disabled when object deletion is not configured")
+	if !status.FileTransferAvailable {
+		t.Fatal("direct encrypted file relay must be enabled without object storage")
 	}
 }
 
 func TestExpiryDestructionInvalidatesStatusAndFutureJoins(t *testing.T) {
-	manager := NewSessionManager(nil)
+	manager := NewSessionManager()
 	id, creatorToken, err := manager.Create()
 	if err != nil {
 		t.Fatalf("create session: %v", err)

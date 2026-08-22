@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import {
+	bytesToBase64Url,
+	base64UrlToBytes,
   createKeyPacket,
   decryptBytes,
   decryptJson,
@@ -10,9 +12,16 @@ import {
   randomSecret,
   type KeyPacket,
 } from "./lib/crypto";
+import { addReceivedChunk, clearReceivedFiles, createReceivedFile, isComplete, type ReceivedFile } from "./lib/fileRelay";
+import { ConnectionEpoch, resetSessionUrl } from "./lib/sessionLifecycle";
 
 type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt: number; destroyAt?: number; you: string; peerOnline: boolean; peerJoined: boolean; fileTransferAvailable: boolean; serverNow: number };
-type ChatItem = { id: string; sender: "you" | "peer"; kind: "message" | "file"; text?: string; file?: { id: string; name: string; type: string; size: number } };
+type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
+type ChatItem = { id: string; sender: "you" | "peer"; kind: "message" | "file"; text?: string; file?: FileMeta };
+type IncomingFile = ReceivedFile & { meta: FileMeta };
+
+const directFileLimit = 2 * 1024 * 1024;
+const directChunkSize = 24 * 1024;
 
 const phase = ref<"home" | "joining" | "room" | "ended">("home");
 const sessionId = ref("");
@@ -34,6 +43,9 @@ let sessionKey: CryptoKey | null = null;
 let ownKeyPacket: KeyPacket | null = null;
 let sequence = 0;
 let lastPeerSequence = 0;
+const incomingFiles = new Map<string, IncomingFile>();
+let incomingFrameQueue: Promise<void> = Promise.resolve();
+const connectionEpoch = new ConnectionEpoch();
 let ticker: number | undefined;
 
 const countdownTarget = computed(() => Math.min(status.value?.expiresAt ?? 0, status.value?.destroyAt ?? Number.POSITIVE_INFINITY));
@@ -76,7 +88,7 @@ async function api(path: string, options: RequestInit = {}) {
 }
 
 async function createSession() {
-  error.value = "";
+  prepareNewSession();
   try {
     pairingSecret.value = randomSecret();
     const response = await api("/api/sessions", { method: "POST" });
@@ -124,27 +136,40 @@ function useCode() {
 
 async function connect() {
   closeSocket();
+  const epoch = connectionEpoch.start();
   isSecure.value = false;
   sessionKey = null;
   const socketScheme = window.location.protocol === "https:" ? "wss" : "ws";
-  socket = new WebSocket(`${socketScheme}://${window.location.host}/api/ws?sessionId=${encodeURIComponent(sessionId.value)}&token=${encodeURIComponent(participantToken.value)}`);
-  socket.onopen = async () => {
+  const connection = new WebSocket(`${socketScheme}://${window.location.host}/api/ws?sessionId=${encodeURIComponent(sessionId.value)}&token=${encodeURIComponent(participantToken.value)}`);
+  socket = connection;
+  connection.onopen = async () => {
+    if (!connectionEpoch.isCurrent(epoch) || socket !== connection) return;
     try {
       const keyMaterial = await createKeyPacket(sessionId.value, pairingSecret.value);
       privateKey = keyMaterial.privateKey;
       ownKeyPacket = keyMaterial.packet;
       sendKeyIfReady();
     } catch {
-      failSecurely("无法建立本地加密材料，已拒绝会话。");
+      if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("无法建立本地加密材料，已拒绝会话。");
     }
   };
-  socket.onmessage = async (event) => {
-    try { await handleIncoming(event.data); } catch { failSecurely("检测到无效或被篡改的数据，已终止会话。"); }
+  connection.onmessage = (event) => {
+    if (!connectionEpoch.isCurrent(epoch) || socket !== connection) return;
+    incomingFrameQueue = incomingFrameQueue
+      .then(() => {
+        if (!connectionEpoch.isCurrent(epoch) || socket !== connection) return;
+        return handleIncoming(event.data);
+      })
+      .catch(() => { if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("检测到无效、重放或被篡改的数据，已终止会话。"); });
   };
-  socket.onclose = () => {
-    if (phase.value === "room" && !error.value) notice.value = "连接已关闭。基于隐私保护规则，本会话将进入销毁流程。";
+  connection.onclose = () => {
+    if (connectionEpoch.isCurrent(epoch) && socket === connection && phase.value === "room") {
+      closeSocket();
+      wipeLocalState();
+      phase.value = "ended";
+    }
   };
-  socket.onerror = () => { error.value = "安全通道无法建立。未发送任何内容。"; };
+  connection.onerror = () => { if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("安全通道无法建立。未发送任何内容。"); };
 }
 
 async function handleIncoming(raw: string) {
@@ -172,8 +197,24 @@ async function handleIncoming(raw: string) {
   if (event.type === "file-offer") {
     if (!sessionKey) throw new Error("not_secure");
     const peerSequence = validatePeerSequence(event.seq);
-    const payload = await decryptJson<{ kind: "file"; id: string; name: string; type: string; size: number }>(sessionKey, { nonce: String(event.nonce), ciphertext: String(event.ciphertext) }, aad("file", peerSequence, peerRole()));
-    messages.value.push({ id: payload.id, sender: "peer", kind: "file", file: payload });
+    const payload = await decryptJson<{ kind: "file"; id: string; name: string; type: string; size: number; chunks: number }>(sessionKey, { nonce: String(event.nonce), ciphertext: String(event.ciphertext) }, aad("file-offer", peerSequence, peerRole()));
+    if (!isSafeFileMeta(payload)) throw new Error("invalid_file_offer");
+    const meta: FileMeta = { id: payload.id, name: payload.name, type: payload.type, size: payload.size, chunks: payload.chunks, state: "receiving" };
+    incomingFiles.set(payload.id, { meta, ...createReceivedFile(payload.size, payload.chunks) });
+    messages.value.push({ id: payload.id, sender: "peer", kind: "file", file: meta });
+    return;
+  }
+  if (event.type === "file-chunk") {
+    if (!sessionKey) throw new Error("not_secure");
+    const peerSequence = validatePeerSequence(event.seq);
+    const fileID = String(event.fileId);
+    const index = Number(event.index);
+    const transfer = incomingFiles.get(fileID);
+    if (!transfer) throw new Error("invalid_file_chunk");
+    const clearChunk = await decryptBytes(sessionKey, base64UrlToBytes(String(event.payload)).buffer, aad("file-chunk", peerSequence, peerRole(), fileID, index));
+    if (clearChunk.byteLength === 0 || clearChunk.byteLength > directChunkSize) throw new Error("invalid_file_chunk_size");
+    if (!addReceivedChunk(transfer, index, clearChunk)) throw new Error("invalid_file_chunk");
+    if (isComplete(transfer)) markFileReady(fileID);
   }
 }
 
@@ -193,20 +234,23 @@ async function sendFile(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file || !sessionKey || !canSend.value) return;
-  if (file.size > 15 * 1024 * 1024) { error.value = "MVP 单文件限制为 15 MB。"; return; }
+  if (file.size > directFileLimit) { error.value = "零持久化文件中继的单文件限制为 2 MB。"; return; }
   sendingFile.value = true;
   try {
     const id = crypto.randomUUID();
-    const encrypted = await encryptBytes(sessionKey, await file.arrayBuffer(), `veilroom:v1:${sessionId.value}:file:${id}`);
-    await api(`/api/files?sessionId=${encodeURIComponent(sessionId.value)}&fileId=${encodeURIComponent(id)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/octet-stream", "Content-Length": String(encrypted.byteLength) },
-      body: encrypted.buffer,
-    });
+    const chunks = Math.ceil(file.size / directChunkSize);
     const seq = ++sequence;
-    const offer = await encryptJson(sessionKey, { kind: "file", id, name: file.name, type: file.type || "application/octet-stream", size: file.size }, aad("file", seq, ownRole()));
+    const offer = await encryptJson(sessionKey, { kind: "file", id, name: file.name, type: file.type || "application/octet-stream", size: file.size, chunks }, aad("file-offer", seq, ownRole()));
     socket?.send(JSON.stringify({ type: "file-offer", seq, ...offer }));
-    messages.value.push({ id, sender: "you", kind: "file", file: { id, name: file.name, type: file.type, size: file.size } });
+    messages.value.push({ id, sender: "you", kind: "file", file: { id, name: file.name, type: file.type, size: file.size, chunks, state: "sending" } });
+    for (let index = 0; index < chunks; index += 1) {
+      await waitForSocketCapacity();
+      const chunk = await file.slice(index * directChunkSize, Math.min(file.size, (index + 1) * directChunkSize)).arrayBuffer();
+      const chunkSequence = ++sequence;
+      const encryptedChunk = await encryptBytes(sessionKey, chunk, aad("file-chunk", chunkSequence, ownRole(), id, index));
+      socket?.send(JSON.stringify({ type: "file-chunk", seq: chunkSequence, fileId: id, index, payload: bytesToBase64Url(encryptedChunk) }));
+    }
+    updateFileState(id, "ready");
   } catch (caught) {
     error.value = humanError(caught);
   } finally {
@@ -215,13 +259,14 @@ async function sendFile(event: Event) {
 }
 
 async function downloadFile(file: NonNullable<ChatItem["file"]>) {
-  if (!sessionKey) return;
+  const transfer = incomingFiles.get(file.id);
+  if (!transfer || !isComplete(transfer)) {
+    error.value = "文件尚未完整抵达，无法安全下载。";
+    return;
+  }
   try {
-    const response = await api(`/api/files/${encodeURIComponent(file.id)}?sessionId=${encodeURIComponent(sessionId.value)}`);
-    const encrypted = await response.arrayBuffer();
-    const clear = await decryptBytes(sessionKey, encrypted, `veilroom:v1:${sessionId.value}:file:${file.id}`);
     const anchor = document.createElement("a");
-    anchor.href = URL.createObjectURL(new Blob([clear], { type: file.type }));
+    anchor.href = URL.createObjectURL(new Blob(transfer.chunks as BlobPart[], { type: file.type }));
     anchor.download = file.name;
     anchor.click();
     URL.revokeObjectURL(anchor.href);
@@ -245,12 +290,27 @@ async function leaveSession() {
   phase.value = "ended";
 }
 
-function closeSocket() { socket?.close(); socket = null; }
+function closeSocket() { connectionEpoch.invalidate(); const active = socket; socket = null; active?.close(); }
+function prepareNewSession() {
+  closeSocket();
+  wipeLocalState();
+  sessionId.value = "";
+  invitation.value = "";
+  joinCode.value = "";
+  message.value = "";
+  status.value = null;
+  messages.value = [];
+  notice.value = "";
+  error.value = "";
+  sendingFile.value = false;
+  resetSessionUrl(window.history);
+  phase.value = "home";
+}
 function sendKeyIfReady() {
   if (!ownKeyPacket || !status.value?.peerJoined || socket?.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ type: "key", ...ownKeyPacket }));
 }
-function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
+function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
 function failSecurely(reason: string) { error.value = reason; closeSocket(); wipeLocalState(); phase.value = "ended"; }
 function ownRole() { return status.value?.you ?? "unknown"; }
 function peerRole() { return ownRole() === "A" ? "B" : "A"; }
@@ -260,14 +320,25 @@ function validatePeerSequence(value: unknown) {
   lastPeerSequence = parsed;
   return parsed;
 }
-function aad(kind: string, seq: number, role: string) { return `veilroom:v1:${sessionId.value}:${role}:${kind}:${seq}`; }
+function aad(kind: string, seq: number, role: string, fileID = "", index = -1) { return `veilroom:v1:${sessionId.value}:${role}:${kind}:${seq}:${fileID}:${index}`; }
+function isSafeFileMeta(value: { id: string; name: string; type: string; size: number; chunks: number }) {
+  return typeof value.id === "string" && value.id.length > 0 && value.id.length < 128 && typeof value.name === "string" && value.name.length <= 512 && typeof value.type === "string" && value.type.length <= 256 && Number.isSafeInteger(value.size) && value.size > 0 && value.size <= directFileLimit && Number.isSafeInteger(value.chunks) && value.chunks === Math.ceil(value.size / directChunkSize);
+}
+function updateFileState(id: string, state: NonNullable<FileMeta["state"]>) {
+  const item = messages.value.find((candidate) => candidate.id === id && candidate.kind === "file");
+  if (item?.file) item.file.state = state;
+}
+function markFileReady(id: string) { updateFileState(id, "ready"); }
+async function waitForSocketCapacity() {
+  while (socket && socket.bufferedAmount > 512 * 1024) await new Promise((resolve) => window.setTimeout(resolve, 16));
+  if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error("session_closing");
+}
 function humanError(caught: unknown) {
   const code = caught instanceof Error ? caught.message : "request_failed";
   const map: Record<string, string> = {
     session_unavailable: "此会话不存在、已被销毁或已过期。",
     session_locked: "此会话已经锁定，无法再加入。",
     session_closing: "此会话正在销毁，已安全拒绝操作。",
-    encrypted_file_transfer_unavailable: "加密文件传输尚未配置安全对象存储。",
     invalid_invitation: "邀请链接无效或缺少本地密钥片段。",
   };
   return map[code] ?? "操作未完成。为保护隐私，系统没有保留任何待重试内容。";
@@ -328,12 +399,12 @@ function humanError(caught: unknown) {
           <div v-for="item in messages" :key="item.id" class="message-row" :class="item.sender">
             <div v-if="item.kind === 'message'" class="bubble">{{ item.text }}</div>
             <button v-else class="file-card" @click="item.sender === 'peer' && item.file && downloadFile(item.file)">
-              <span class="file-symbol">↥</span><span><b>{{ item.file?.name }}</b><small>{{ Math.ceil((item.file?.size ?? 0) / 1024) }} KB · 已加密</small></span><i v-if="item.sender === 'peer'">下载</i>
+              <span class="file-symbol">↥</span><span><b>{{ item.file?.name }}</b><small>{{ Math.ceil((item.file?.size ?? 0) / 1024) }} KB · {{ item.file?.state === 'receiving' ? '正在内存中接收' : item.file?.state === 'sending' ? '正在加密中继' : '已加密 · 不落盘' }}</small></span><i v-if="item.sender === 'peer'">{{ item.file?.state === 'ready' ? '下载' : '接收中' }}</i>
             </button>
           </div>
         </div>
         <form class="composer" @submit.prevent="sendMessage">
-          <label class="file-picker" :class="{ disabled: !canSendFile || sendingFile }" :title="canSendFile ? '加密并发送文件' : '文件传输仅会在可安全删除的对象存储配置后启用'"><input type="file" :disabled="!canSendFile || sendingFile" @change="sendFile" /><span>＋</span></label>
+          <label class="file-picker" :class="{ disabled: !canSendFile || sendingFile }" :title="canSendFile ? '以端到端加密分片经内存中继发送文件' : '等待安全会话就绪'"><input type="file" :disabled="!canSendFile || sendingFile" @change="sendFile" /><span>＋</span></label>
           <input v-model="message" :disabled="!canSend" maxlength="4096" placeholder="写下只属于此刻的话…" autocomplete="off" />
           <button type="submit" :disabled="!canSend || !message.trim()" aria-label="发送消息">↑</button>
         </form>
@@ -341,7 +412,7 @@ function humanError(caught: unknown) {
       <section v-if="invitation" class="invite-drawer"><p><span>给另一位参与者的钥匙</span>分享此链接后，会话将锁定为两人。</p><div><code>{{ invitation }}</code><button @click="copyInvitation">复制</button></div></section>
     </section>
 
-    <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>这段会话已消隐。</h1><p>本地密钥、访问能力和内存消息均已清除。任何加密文件也会进入删除流程。</p><a class="primary-action" href="/">开启新的会话</a></section>
+    <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>这段会话已消隐。</h1><p>本地密钥、访问能力、内存消息与文件分片均已清除，服务器没有保留文件副本。</p><button class="primary-action" @click="createSession">开启新的会话</button></section>
 
     <p v-if="error && phase === 'home'" class="global-error" role="alert">{{ error }}</p>
   </main>

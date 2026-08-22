@@ -44,12 +44,6 @@ type participant struct {
 	send   chan []byte
 }
 
-type sessionFile struct {
-	id        string
-	objectKey string
-	size      int64
-}
-
 type session struct {
 	id          string
 	createdAt   time.Time
@@ -57,7 +51,6 @@ type session struct {
 	destroyAt   *time.Time
 	state       sessionState
 	participants map[string]*participant
-	files       map[string]sessionFile
 	expiryTimer *time.Timer
 	exitTimer   *time.Timer
 }
@@ -77,14 +70,12 @@ type sessionStatus struct {
 type SessionManager struct {
 	mu       sync.Mutex
 	sessions map[string]*session
-	store    ObjectStore
 	now      func() time.Time
 }
 
-func NewSessionManager(store ObjectStore) *SessionManager {
+func NewSessionManager() *SessionManager {
 	return &SessionManager{
 		sessions: make(map[string]*session),
-		store:    store,
 		now:      time.Now,
 	}
 }
@@ -116,7 +107,6 @@ func (m *SessionManager) Create() (string, string, error) {
 		participants: map[string]*participant{
 			token: {role: "A", token: token, send: make(chan []byte, 16)},
 		},
-		files: make(map[string]sessionFile),
 	}
 	s.expiryTimer = time.AfterFunc(maxSessionAge, func() { m.destroy(id) })
 
@@ -204,7 +194,7 @@ func (m *SessionManager) Relay(id, token string, payload []byte) error {
 		return errors.New("relay payload is not a valid envelope")
 	}
 	switch envelope.Type {
-	case "key", "ciphertext", "file-offer", "file-ready", "ping":
+	case "key", "ciphertext", "file-offer", "file-chunk", "ping":
 	default:
 		return errors.New("relay envelope type is not allowed")
 	}
@@ -311,10 +301,10 @@ func (m *SessionManager) Status(id, token string) (sessionStatus, error) {
 	if !ok || p.left {
 		return sessionStatus{}, errUnauthorized
 	}
-	return statusFor(s, p.role, m.now(), m.store != nil), nil
+	return statusFor(s, p.role, m.now()), nil
 }
 
-func statusFor(s *session, role string, now time.Time, fileTransferAvailable bool) sessionStatus {
+func statusFor(s *session, role string, now time.Time) sessionStatus {
 	peerRole := "A"
 	if role == "A" {
 		peerRole = "B"
@@ -341,7 +331,7 @@ func statusFor(s *session, role string, now time.Time, fileTransferAvailable boo
 		You:        role,
 		PeerOnline: peerOnline,
 		PeerJoined: peerJoined,
-		FileTransferAvailable: fileTransferAvailable,
+		FileTransferAvailable: true,
 		ServerNow:  now.UnixMilli(),
 	}
 }
@@ -351,7 +341,7 @@ func (m *SessionManager) publishStatusLocked(s *session) {
 		if participant.left || !participant.online {
 			continue
 		}
-		payload, err := json.Marshal(statusFor(s, participant.role, m.now(), m.store != nil))
+		payload, err := json.Marshal(statusFor(s, participant.role, m.now()))
 		if err != nil {
 			continue
 		}
@@ -360,58 +350,6 @@ func (m *SessionManager) publishStatusLocked(s *session) {
 		default:
 			go m.disconnect(s.id, participant.token, participant.conn)
 		}
-	}
-}
-
-func (m *SessionManager) RegisterFile(id, token, fileID string, size int64) (string, error) {
-	if fileID == "" || len(fileID) > 128 || size <= 0 {
-		return "", errors.New("invalid encrypted file descriptor")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s, ok := m.sessions[id]
-	if !ok || s.state != stateLocked {
-		return "", errSessionClosing
-	}
-	p, ok := s.participants[token]
-	if !ok || p.left || !p.online {
-		return "", errUnauthorized
-	}
-	if _, exists := s.files[fileID]; exists {
-		return "", errors.New("file identifier already registered")
-	}
-	objectEntropy, err := randomCapability()
-	if err != nil {
-		return "", err
-	}
-	objectKey := "veilroom/" + s.id + "/" + objectEntropy
-	s.files[fileID] = sessionFile{id: fileID, objectKey: objectKey, size: size}
-	return objectKey, nil
-}
-
-func (m *SessionManager) FileForDownload(id, token, fileID string) (sessionFile, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	s, ok := m.sessions[id]
-	if !ok || s.state == stateDestroyed {
-		return sessionFile{}, errSessionNotFound
-	}
-	p, ok := s.participants[token]
-	if !ok || p.left {
-		return sessionFile{}, errUnauthorized
-	}
-	file, ok := s.files[fileID]
-	if !ok {
-		return sessionFile{}, errors.New("file not found")
-	}
-	return file, nil
-}
-
-func (m *SessionManager) RemoveFile(id, fileID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if s, ok := m.sessions[id]; ok {
-		delete(s.files, fileID)
 	}
 }
 
@@ -430,10 +368,6 @@ func (m *SessionManager) destroy(id string) {
 		s.exitTimer.Stop()
 	}
 	connections := make([]*websocket.Conn, 0, len(s.participants))
-	files := make([]sessionFile, 0, len(s.files))
-	for _, file := range s.files {
-		files = append(files, file)
-	}
 	for _, participant := range s.participants {
 		if participant.conn != nil {
 			connections = append(connections, participant.conn)
@@ -442,19 +376,11 @@ func (m *SessionManager) destroy(id string) {
 		participant.online = false
 		participant.conn = nil
 	}
-	s.files = nil
 	s.participants = nil
 	delete(m.sessions, id)
 	m.mu.Unlock()
 
 	for _, conn := range connections {
 		_ = conn.Close(websocket.StatusPolicyViolation, "session ended")
-	}
-	if m.store != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		for _, file := range files {
-			_ = m.store.Delete(ctx, file.objectKey)
-		}
 	}
 }

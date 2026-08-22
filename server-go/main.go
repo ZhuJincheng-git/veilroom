@@ -5,32 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"nhooyr.io/websocket"
 )
 
-const maxEncryptedFileSize = 20 << 20
-
 type apiServer struct {
 	manager *SessionManager
-	store   ObjectStore
 	assets  string
 }
 
 func main() {
-	store, err := newObjectStoreFromEnv()
-	if err != nil {
-		panic("encrypted storage configuration is invalid")
-	}
-	server := &apiServer{manager: NewSessionManager(store), store: store, assets: resolveAssetsDir()}
+	server := &apiServer{manager: NewSessionManager(), assets: resolveAssetsDir()}
 	port := strings.TrimSpace(os.Getenv("PORT"))
 	if port == "" {
 		port = "3000"
@@ -56,8 +46,6 @@ func (s *apiServer) routes() http.Handler {
 	mux.HandleFunc("POST /api/sessions/{sessionID}/leave", s.leaveSession)
 	mux.HandleFunc("GET /api/sessions/{sessionID}/status", s.getStatus)
 	mux.HandleFunc("GET /api/ws", s.webSocket)
-	mux.HandleFunc("POST /api/files", s.uploadFile)
-	mux.HandleFunc("GET /api/files/{fileID}", s.downloadFile)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	})
@@ -180,66 +168,6 @@ func (s *apiServer) webSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *apiServer) uploadFile(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "encrypted_file_transfer_unavailable")
-		return
-	}
-	id, token, fileID := r.URL.Query().Get("sessionId"), bearerToken(r), r.URL.Query().Get("fileId")
-	if token == "" || id == "" || fileID == "" {
-		writeAPIError(w, http.StatusUnauthorized, "invalid_capability")
-		return
-	}
-	if r.ContentLength <= 0 || r.ContentLength > maxEncryptedFileSize {
-		writeAPIError(w, http.StatusRequestEntityTooLarge, "encrypted_file_size_limit")
-		return
-	}
-	objectKey, err := s.manager.RegisterFile(id, token, fileID, r.ContentLength)
-	if err != nil {
-		writeSessionError(w, err)
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxEncryptedFileSize)
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	err = s.store.Put(ctx, objectKey, r.Body, r.ContentLength)
-	cancel()
-	if err != nil {
-		s.manager.RemoveFile(id, fileID)
-		writeAPIError(w, http.StatusBadGateway, "encrypted_upload_failed")
-		return
-	}
-	writeJSON(w, http.StatusCreated, map[string]string{"fileId": fileID})
-}
-
-func (s *apiServer) downloadFile(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "encrypted_file_transfer_unavailable")
-		return
-	}
-	id, token := r.URL.Query().Get("sessionId"), bearerToken(r)
-	if token == "" || id == "" {
-		writeAPIError(w, http.StatusUnauthorized, "invalid_capability")
-		return
-	}
-	file, err := s.manager.FileForDownload(id, token, r.PathValue("fileID"))
-	if err != nil {
-		writeSessionError(w, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-	body, _, err := s.store.Get(ctx, file.objectKey)
-	if err != nil {
-		cancel()
-		writeAPIError(w, http.StatusNotFound, "encrypted_file_not_found")
-		return
-	}
-	defer cancel()
-	defer body.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": "veilroom.enc"}))
-	_, _ = io.Copy(w, body)
-}
-
 func bearerToken(r *http.Request) string {
 	value := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(value, "Bearer ") {
@@ -286,9 +214,4 @@ func staticExists(root, requestPath string) bool {
 		return false
 	}
 	return true
-}
-
-func parsePositiveInt(value string) (int64, bool) {
-	parsed, err := strconv.ParseInt(value, 10, 64)
-	return parsed, err == nil && parsed > 0
 }

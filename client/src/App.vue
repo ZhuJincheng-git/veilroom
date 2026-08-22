@@ -22,7 +22,7 @@ type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt
 type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
 type ChatItem = { id: string; sender: "you" | "peer"; kind: "message" | "file"; text?: string; file?: FileMeta };
 type IncomingFile = ReceivedFile & { meta: FileMeta };
-type BinaryCell = { id: number; bit: "0" | "1"; phase: number; bright: boolean };
+type ByteGlyph = { bit: "0" | "1"; x: number; y: number; changedAt: number; bright: boolean };
 
 const directFileLimit = 2 * 1024 * 1024;
 const directChunkSize = 24 * 1024;
@@ -40,8 +40,7 @@ const messages = ref<ChatItem[]>([]);
 const now = ref(Date.now());
 const isSecure = ref(false);
 const sendingFile = ref(false);
-const binaryCells = ref<BinaryCell[]>([]);
-const byteMaskStyle = ref<Record<string, string>>({});
+const byteCanvas = ref<HTMLCanvasElement | null>(null);
 let socket: WebSocket | null = null;
 let privateKey: CryptoKey | null = null;
 let sessionKey: CryptoKey | null = null;
@@ -57,8 +56,11 @@ const returnHomeAt = ref<number | null>(null);
 let toastTimer: number | undefined;
 let toastSequence = 0;
 let heartbeatTimer: number | undefined;
-let byteFieldTimer: number | undefined;
-let byteMaskTimer: number | undefined;
+let byteAnimationFrame: number | undefined;
+let byteResizeHandler: (() => void) | undefined;
+let byteGlyphs: ByteGlyph[] = [];
+let byteMaskCanvas: HTMLCanvasElement | null = null;
+let byteMasks: Array<{ x: number; y: number; radius: number }> = [];
 
 const countdownTarget = computed(() => sessionDeadline(status.value));
 const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
@@ -375,35 +377,103 @@ function clearHeartbeat() {
   heartbeatTimer = undefined;
 }
 function initialiseByteField() {
-  binaryCells.value = Array.from({ length: 180 }, (_, id) => ({ id, bit: Math.random() > 0.5 ? "1" : "0", phase: 0, bright: Math.random() > 0.87 }));
-  moveByteMask();
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  byteFieldTimer = window.setInterval(() => {
-    const next = [...binaryCells.value];
-    const changes = 16 + Math.floor(Math.random() * 20);
-    for (let count = 0; count < changes; count += 1) {
-      const index = Math.floor(Math.random() * next.length);
-      const cell = next[index];
-      next[index] = { ...cell, bit: cell.bit === "0" ? "1" : "0", phase: cell.phase + 1, bright: Math.random() > 0.74 };
+  const canvas = byteCanvas.value;
+  if (!canvas) return;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  const maskCanvas = document.createElement("canvas");
+  const maskContext = maskCanvas.getContext("2d");
+  if (!maskContext) return;
+  byteMaskCanvas = maskCanvas;
+  let width = 0;
+  let height = 0;
+  let lastMutation = 0;
+  let lastMaskMove = 0;
+
+  const setMaskPosition = () => {
+    const position = (radiusRatio: number) => ({
+      x: width * (.08 + Math.random() * .84),
+      y: height * (-.16 + Math.random() * .58),
+      radius: Math.min(width, height) * radiusRatio,
+    });
+    byteMasks = [position(.34), position(.24), position(.17)];
+    maskContext.clearRect(0, 0, width, height);
+    for (const mask of byteMasks) {
+      const gradient = maskContext.createRadialGradient(mask.x, mask.y, mask.radius * .1, mask.x, mask.y, mask.radius);
+      gradient.addColorStop(0, "rgba(0,0,0,1)");
+      gradient.addColorStop(.5, "rgba(0,0,0,.82)");
+      gradient.addColorStop(1, "rgba(0,0,0,0)");
+      maskContext.fillStyle = gradient;
+      maskContext.fillRect(mask.x - mask.radius, mask.y - mask.radius, mask.radius * 2, mask.radius * 2);
     }
-    binaryCells.value = next;
-  }, 260);
-  byteMaskTimer = window.setInterval(moveByteMask, 1_180);
-}
-function moveByteMask() {
-  const horizontal = () => `${8 + Math.floor(Math.random() * 84)}%`;
-  const vertical = () => `${-12 + Math.floor(Math.random() * 56)}%`;
-  byteMaskStyle.value = {
-    "--mask-one-x": horizontal(), "--mask-one-y": vertical(),
-    "--mask-two-x": horizontal(), "--mask-two-y": vertical(),
-    "--mask-three-x": horizontal(), "--mask-three-y": vertical(),
   };
+  const resize = () => {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.ceil(width * dpr);
+    canvas.height = Math.ceil(height * dpr);
+    maskCanvas.width = Math.ceil(width * dpr);
+    maskCanvas.height = Math.ceil(height * dpr);
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    maskContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const columns = Math.max(10, Math.ceil(width / 72));
+    const rows = Math.max(10, Math.ceil(height / 43));
+    byteGlyphs = Array.from({ length: columns * rows }, (_, index) => ({
+      bit: Math.random() > .5 ? "1" : "0",
+      x: ((index % columns) + .5) * (width / columns) + (Math.random() - .5) * 12,
+      y: (Math.floor(index / columns) + .5) * (height / rows) + (Math.random() - .5) * 10,
+      changedAt: performance.now() - 500,
+      bright: Math.random() > .89,
+    }));
+    setMaskPosition();
+  };
+  const render = (timestamp: number) => {
+    if (timestamp - lastMutation > 170) {
+      const changes = Math.min(byteGlyphs.length, 18 + Math.floor(Math.random() * 22));
+      for (let count = 0; count < changes; count += 1) {
+        const glyph = byteGlyphs[Math.floor(Math.random() * byteGlyphs.length)];
+        glyph.bit = glyph.bit === "0" ? "1" : "0";
+        glyph.changedAt = timestamp;
+        glyph.bright = Math.random() > .72;
+      }
+      lastMutation = timestamp;
+    }
+    if (timestamp - lastMaskMove > 1_100) { setMaskPosition(); lastMaskMove = timestamp; }
+    context.clearRect(0, 0, width, height);
+    context.font = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    for (const glyph of byteGlyphs) {
+      const age = timestamp - glyph.changedAt;
+      context.filter = age < 230 ? `blur(${Math.max(.2, 3 - age / 80)}px)` : "none";
+      context.globalAlpha = glyph.bright ? .24 : .10;
+      context.fillStyle = glyph.bright ? "#83f2d0" : "#d4eee6";
+      context.fillText(glyph.bit, glyph.x, glyph.y);
+    }
+    if (byteMaskCanvas) {
+      context.save();
+      context.globalCompositeOperation = "destination-in";
+      context.drawImage(byteMaskCanvas, 0, 0, width, height);
+      context.restore();
+    }
+    context.filter = "none";
+    context.globalAlpha = 1;
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) byteAnimationFrame = window.requestAnimationFrame(render);
+  };
+  byteResizeHandler = resize;
+  window.addEventListener("resize", resize, { passive: true });
+  resize();
+  byteAnimationFrame = window.requestAnimationFrame(render);
 }
 function clearByteFieldTimer() {
-  if (byteFieldTimer !== undefined) window.clearInterval(byteFieldTimer);
-  if (byteMaskTimer !== undefined) window.clearInterval(byteMaskTimer);
-  byteFieldTimer = undefined;
-  byteMaskTimer = undefined;
+  if (byteAnimationFrame !== undefined) window.cancelAnimationFrame(byteAnimationFrame);
+  if (byteResizeHandler) window.removeEventListener("resize", byteResizeHandler);
+  byteAnimationFrame = undefined;
+  byteResizeHandler = undefined;
+  byteGlyphs = [];
+  byteMasks = [];
+  byteMaskCanvas = null;
 }
 function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
 function failSecurely(reason: string) { notify(reason, "error"); endSession(); }
@@ -441,9 +511,7 @@ function humanError(caught: unknown) {
 </script>
 
 <template>
-  <div class="byte-field" :style="byteMaskStyle" aria-hidden="true">
-    <span v-for="cell in binaryCells" :key="cell.id" class="byte-cell" :class="{ bright: cell.bright, changing: cell.phase > 0 }">{{ cell.bit }}</span>
-  </div>
+  <canvas ref="byteCanvas" class="byte-field" aria-hidden="true"></canvas>
   <main class="app-shell" :class="{ 'session-shell': phase === 'room', 'home-shell': phase === 'home' }">
     <header class="topbar">
       <a class="brand" href="/" aria-label="VeilRoom 首页"><span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5 9.7 18h4.6L20 5.5M8 5.5l4 8.7 4-8.7" /></svg></span><span>veilroom</span></a>

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,8 +28,6 @@ func main() {
 		Addr:              ":" + port,
 		Handler:           server.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	fmt.Printf("Server running on http://localhost:%s/\n", port)
@@ -151,9 +148,7 @@ func (s *apiServer) webSocket(w http.ResponseWriter, r *http.Request) {
 	defer s.manager.Disconnect(id, token, conn)
 
 	for {
-		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
-		typeID, payload, err := conn.Read(ctx)
-		cancel()
+		typeID, payload, err := conn.Read(r.Context())
 		if err != nil {
 			return
 		}

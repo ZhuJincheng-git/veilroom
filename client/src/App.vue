@@ -53,6 +53,7 @@ let returnHomeTimer: number | undefined;
 const returnHomeAt = ref<number | null>(null);
 let toastTimer: number | undefined;
 let toastSequence = 0;
+let heartbeatTimer: number | undefined;
 
 const countdownTarget = computed(() => sessionDeadline(status.value));
 const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
@@ -78,6 +79,7 @@ onBeforeUnmount(() => {
   if (ticker) window.clearInterval(ticker);
   clearReturnHomeTimer();
   clearToastTimer();
+  clearHeartbeat();
   closeSocket();
 });
 
@@ -155,6 +157,7 @@ async function connect() {
       ownKeyPacket = keyMaterial.packet;
       sendKeyIfReady();
       void hydrateStatus(epoch, connection);
+      startHeartbeat(epoch, connection);
     } catch {
       if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("无法建立本地加密材料，已拒绝会话。");
     }
@@ -303,7 +306,7 @@ async function leaveSession() {
   endSession();
 }
 
-function closeSocket() { connectionEpoch.invalidate(); const active = socket; socket = null; active?.close(); }
+function closeSocket() { clearHeartbeat(); connectionEpoch.invalidate(); const active = socket; socket = null; active?.close(); }
 function resetSessionView() {
   closeSocket();
   wipeLocalState();
@@ -352,6 +355,17 @@ function clearToastTimer() {
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   toastTimer = undefined;
 }
+function startHeartbeat(epoch: number, connection: WebSocket) {
+  clearHeartbeat();
+  heartbeatTimer = window.setInterval(() => {
+    if (!connectionEpoch.isCurrent(epoch) || socket !== connection || connection.readyState !== WebSocket.OPEN) return;
+    connection.send(JSON.stringify({ type: "ping" }));
+  }, 20_000);
+}
+function clearHeartbeat() {
+  if (heartbeatTimer !== undefined) window.clearInterval(heartbeatTimer);
+  heartbeatTimer = undefined;
+}
 function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
 function failSecurely(reason: string) { notify(reason, "error"); endSession(); }
 function ownRole() { return status.value?.you ?? "unknown"; }
@@ -388,7 +402,7 @@ function humanError(caught: unknown) {
 </script>
 
 <template>
-  <main class="app-shell">
+  <main class="app-shell" :class="{ 'session-shell': phase === 'room' }">
     <header class="topbar">
       <a class="brand" href="/" aria-label="VeilRoom 首页"><span class="brand-mark">V</span><span>veilroom</span></a>
       <span class="privacy-mark"><i></i> 零存储 · 端到端加密</span>

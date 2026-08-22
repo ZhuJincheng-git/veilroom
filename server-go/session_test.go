@@ -102,3 +102,14 @@ func TestExpiryDestructionInvalidatesStatusAndFutureJoins(t *testing.T) {
 		t.Fatalf("destroyed session cannot accept a later join, got %v", err)
 	}
 }
+
+func TestIdleSessionRemainsAvailableUntilAnExplicitLifecycleCondition(t *testing.T) {
+	manager := NewSessionManager()
+	id, creatorToken, err := manager.Create()
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := manager.Status(id, creatorToken); err != nil {
+		t.Fatalf("an idle session must remain available before its absolute deadline, got %v", err)
+	}
+}

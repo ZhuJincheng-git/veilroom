@@ -14,6 +14,7 @@ import {
 } from "./lib/crypto";
 import { addReceivedChunk, clearReceivedFiles, createReceivedFile, isComplete, type ReceivedFile } from "./lib/fileRelay";
 import { clearExpiredSessionView, ConnectionEpoch } from "./lib/sessionLifecycle";
+import { formatCountdown, sessionDeadline } from "./lib/countdown";
 
 type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt: number; destroyAt?: number; you: string; peerOnline: boolean; peerJoined: boolean; fileTransferAvailable: boolean; serverNow: number };
 type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
@@ -48,13 +49,10 @@ let incomingFrameQueue: Promise<void> = Promise.resolve();
 const connectionEpoch = new ConnectionEpoch();
 let ticker: number | undefined;
 
-const countdownTarget = computed(() => Math.min(status.value?.expiresAt ?? 0, status.value?.destroyAt ?? Number.POSITIVE_INFINITY));
-const remaining = computed(() => Math.max(0, countdownTarget.value - now.value));
-const formattedRemaining = computed(() => {
-  const seconds = Math.ceil(remaining.value / 1000);
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-});
-const isClosing = computed(() => status.value?.state === "CLOSING" || remaining.value <= 60_000);
+const countdownTarget = computed(() => sessionDeadline(status.value));
+const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
+const formattedRemaining = computed(() => formatCountdown(status.value, now.value));
+const isClosing = computed(() => status.value?.state === "CLOSING" || (remaining.value !== null && remaining.value <= 60_000));
 const peerLabel = computed(() => status.value?.peerOnline ? "在线且已加密" : status.value?.peerJoined ? "已加入，等待连接" : "等待受邀者");
 const canSend = computed(() => isSecure.value && status.value?.state === "LOCKED" && status.value.peerOnline);
 const canSendFile = computed(() => Boolean(canSend.value && status.value?.fileTransferAvailable));
@@ -149,6 +147,7 @@ async function connect() {
       privateKey = keyMaterial.privateKey;
       ownKeyPacket = keyMaterial.packet;
       sendKeyIfReady();
+      void hydrateStatus(epoch, connection);
     } catch {
       if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("无法建立本地加密材料，已拒绝会话。");
     }
@@ -168,6 +167,16 @@ async function connect() {
     }
   };
   connection.onerror = () => { if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely("安全通道无法建立。未发送任何内容。"); };
+}
+
+async function hydrateStatus(epoch: number, connection: WebSocket) {
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(sessionId.value)}/status`);
+    const currentStatus = await response.json() as Status;
+    if (connectionEpoch.isCurrent(epoch) && socket === connection) status.value = currentStatus;
+  } catch (caught) {
+    if (connectionEpoch.isCurrent(epoch) && socket === connection) failSecurely(humanError(caught));
+  }
 }
 
 async function handleIncoming(raw: string) {
@@ -388,7 +397,7 @@ function humanError(caught: unknown) {
         <div>
           <p class="eyebrow">Ephemeral session</p>
           <h2>仅限两人</h2>
-          <div class="timer-block" :class="{ warning: isClosing }"><span>剩余时间</span><strong>{{ formattedRemaining }}</strong><small>{{ status?.state === 'CLOSING' ? '会话即将消隐' : '最长 10 分钟' }}</small></div>
+          <div class="timer-block" :class="{ warning: isClosing }"><span>剩余时间</span><strong>{{ formattedRemaining }}</strong><small>{{ !status ? '正在同步安全会话状态' : status.state === 'CLOSING' ? '会话即将消隐' : '最长 10 分钟' }}</small></div>
         </div>
         <div class="peer-state"><span class="presence" :class="{ online: status?.peerOnline }"></span><div><b>另一位参与者</b><p>{{ peerLabel }}</p></div></div>
         <div class="security-detail"><span>⌁</span><p><b>{{ isSecure ? '加密已验证' : '正在验证密钥' }}</b>你的密钥仅存在于此浏览器内存中。</p></div>

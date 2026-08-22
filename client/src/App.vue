@@ -511,8 +511,9 @@ function humanError(caught: unknown) {
 </script>
 
 <template>
-  <canvas ref="byteCanvas" class="byte-field" aria-hidden="true"></canvas>
-  <main class="app-shell" :class="{ 'session-shell': phase === 'room', 'home-shell': phase === 'home' }">
+  <div class="app-root">
+    <canvas ref="byteCanvas" class="byte-field" aria-hidden="true"></canvas>
+    <main class="app-shell" :class="{ 'session-shell': phase === 'room', 'home-shell': phase === 'home' }">
     <header class="topbar">
       <a class="brand" href="/" aria-label="VeilRoom 首页"><span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5 9.7 18h4.6L20 5.5M8 5.5l4 8.7 4-8.7" /></svg></span><span>veilroom</span></a>
       <span class="topbar-signal" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -591,14 +592,15 @@ function humanError(caught: unknown) {
 
     <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>会话已销毁</h1><p class="eyebrow">{{ returnHomeSeconds }} 秒后返回首页</p></section>
 
-  </main>
-  <Teleport to="body">
-    <Transition name="toast">
-      <div v-if="toast" :key="toast.id" class="global-toast" :class="toast.kind" role="status" aria-live="polite">
-        <span class="toast-glyph">{{ toast.kind === 'success' ? '✓' : toast.kind === 'warning' ? '!' : '×' }}</span>
-        <p>{{ toast.message }}</p>
-        <i class="toast-progress"></i>
-      </div>
-    </Transition>
-  </Teleport>
+    </main>
+    <Teleport to="body">
+      <Transition name="toast">
+        <div v-if="toast" :key="toast.id" class="global-toast" :class="toast.kind" role="status" aria-live="polite">
+          <span class="toast-glyph">{{ toast.kind === 'success' ? '✓' : toast.kind === 'warning' ? '!' : '×' }}</span>
+          <p>{{ toast.message }}</p>
+          <i class="toast-progress"></i>
+        </div>
+      </Transition>
+    </Teleport>
+  </div>
 </template>

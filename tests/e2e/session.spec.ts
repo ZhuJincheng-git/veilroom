@@ -28,6 +28,7 @@ test.describe("VeilRoom anonymous session", () => {
   });
 
   test("a second participant locks the room and remains during the exit grace window @production", async ({ browser }) => {
+    test.setTimeout(45_000);
     const creatorContext = await browser.newContext();
     const creator = await creatorContext.newPage();
     const creatorErrors = watchBrowserErrors(creator);

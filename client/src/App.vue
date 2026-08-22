@@ -15,6 +15,7 @@ import {
 import { addReceivedChunk, clearReceivedFiles, createReceivedFile, isComplete, type ReceivedFile } from "./lib/fileRelay";
 import { clearExpiredSessionView, ConnectionEpoch } from "./lib/sessionLifecycle";
 import { formatCountdown, sessionDeadline } from "./lib/countdown";
+import { secondsUntilReturn } from "./lib/returnCountdown";
 
 type Status = { state: "WAITING" | "LOCKED" | "CLOSING" | "DESTROYED"; expiresAt: number; destroyAt?: number; you: string; peerOnline: boolean; peerJoined: boolean; fileTransferAvailable: boolean; serverNow: number };
 type FileMeta = { id: string; name: string; type: string; size: number; chunks?: number; state?: "sending" | "receiving" | "ready" };
@@ -48,6 +49,8 @@ const incomingFiles = new Map<string, IncomingFile>();
 let incomingFrameQueue: Promise<void> = Promise.resolve();
 const connectionEpoch = new ConnectionEpoch();
 let ticker: number | undefined;
+let returnHomeTimer: number | undefined;
+const returnHomeAt = ref<number | null>(null);
 
 const countdownTarget = computed(() => sessionDeadline(status.value));
 const remaining = computed(() => countdownTarget.value === null ? null : Math.max(0, countdownTarget.value - now.value));
@@ -56,6 +59,7 @@ const isClosing = computed(() => status.value?.state === "CLOSING" || (remaining
 const peerLabel = computed(() => status.value?.peerOnline ? "在线且已加密" : status.value?.peerJoined ? "已加入，等待连接" : "等待受邀者");
 const canSend = computed(() => isSecure.value && status.value?.state === "LOCKED" && status.value.peerOnline);
 const canSendFile = computed(() => Boolean(canSend.value && status.value?.fileTransferAvailable));
+const returnHomeSeconds = computed(() => secondsUntilReturn(returnHomeAt.value, now.value));
 
 onMounted(() => {
   ticker = window.setInterval(() => { now.value = Date.now(); }, 250);
@@ -70,6 +74,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (ticker) window.clearInterval(ticker);
+  clearReturnHomeTimer();
   closeSocket();
 });
 
@@ -313,8 +318,11 @@ function resetSessionView() {
 function endSession() {
   resetSessionView();
   phase.value = "ended";
+  scheduleReturnHome();
 }
 function prepareNewSession() {
+  clearReturnHomeTimer();
+  returnHomeAt.value = null;
   resetSessionView();
   error.value = "";
   phase.value = "home";
@@ -322,6 +330,19 @@ function prepareNewSession() {
 function sendKeyIfReady() {
   if (!ownKeyPacket || !status.value?.peerJoined || socket?.readyState !== WebSocket.OPEN) return;
   socket.send(JSON.stringify({ type: "key", ...ownKeyPacket }));
+}
+function scheduleReturnHome() {
+  clearReturnHomeTimer();
+  returnHomeAt.value = Date.now() + 3_000;
+  returnHomeTimer = window.setTimeout(() => {
+    returnHomeAt.value = null;
+    error.value = "";
+    phase.value = "home";
+  }, 3_000);
+}
+function clearReturnHomeTimer() {
+  if (returnHomeTimer !== undefined) window.clearTimeout(returnHomeTimer);
+  returnHomeTimer = undefined;
 }
 function wipeLocalState() { privateKey = null; sessionKey = null; ownKeyPacket = null; isSecure.value = false; clearReceivedFiles(incomingFiles); incomingFrameQueue = Promise.resolve(); participantToken.value = ""; pairingSecret.value = ""; sequence = 0; lastPeerSequence = 0; }
 function failSecurely(reason: string) { error.value = reason; endSession(); }
@@ -425,7 +446,7 @@ function humanError(caught: unknown) {
       <section v-if="invitation" class="invite-drawer"><p><span>给另一位参与者的钥匙</span>分享此链接后，会话将锁定为两人。</p><div><code>{{ invitation }}</code><button @click="copyInvitation">复制</button></div></section>
     </section>
 
-    <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>这段会话已消隐。</h1><p>本地密钥、访问能力、内存消息与文件分片均已清除，服务器没有保留文件副本。</p><button class="primary-action" @click="createSession">开启新的会话</button></section>
+    <section v-else class="decision-panel ended"><span class="veil-icon">—</span><p class="eyebrow">Session sealed</p><h1>会话已销毁</h1><p class="eyebrow">{{ returnHomeSeconds }} 秒后返回首页</p></section>
 
     <p v-if="error && phase === 'home'" class="global-error" role="alert">{{ error }}</p>
   </main>
